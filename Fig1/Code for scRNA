@@ -1,0 +1,391 @@
+###################################Singlecell part##############################
+library(Seurat)
+library(dplyr)
+library(reshape2)
+library(RColorBrewer)
+library(ggrepel)
+library(ggplot2)
+library(tidyr)
+library(viridis)
+library(SeuratWrappers)
+library(DoubletFinder)
+library(Matrix)
+
+my36colors <-c('#E95C59','#E5D2DD', '#53A85F', '#F1BB72', '#F3B1A0', '#D6E7A3', '#57C3F3', '#476D87', '#E59CC4', '#AB3282', '#23452F', '#BD956A', '#8C549C', '#585658',
+               '#9FA3A8', '#E0D4CA', '#5F3D69', '#C5DEBA', '#58A4C3', '#E4C755', '#F7F398',
+               '#AA9A59', '#E63863', '#E39A35', '#C1E6F3', '#6778AE', '#91D0BE', '#B53E2B',
+               '#712820', '#DCC1DD', '#CCE0F5',  '#CCC9E6', '#625D9E', '#68A180', '#3A6963',
+               '#968175'
+)
+my2colors <- c("#2ca02c","#1f77b4")
+GSE140228.data <- readMM("./data/matrix.mtx") 
+dim(GSE140228.data)#54574 66187
+gene.names = read.delim('./data/features.tsv.gz',header = F, stringsAsFactors = FALSE)
+dim(gene.names)#54574 7
+gene.names[1:3,1:3]
+barcode.names = read.delim("./data/barcodes.tsv.gz",header = FALSE,stringsAsFactors = FALSE)
+dim(barcode.names) #66187     1
+head(barcode.names)
+colnames(GSE140228.data) = barcode.names$V1
+rownames(GSE140228.data) = gene.names$V2 
+GSE140228.data[1:4,1:4]
+dim(GSE140228.data)
+table(duplicated(GSE140228.data@Dimnames[[1]]))##
+GSE140228.data=GSE140228.data[!duplicated(GSE140228.data@Dimnames[[1]]) ,]##
+GSE140228_HCC <- CreateSeuratObject(GSE140228.data,min.cells=3,min.features = 40,project="GSE140228")
+dim(GSE140228_HCC)#[1] 32285  9575
+
+anno_data<-read.table('./data/cellinfo.tsv.gz',header = T)
+#add metadata
+anno_data <- anno_data[match(rownames(GSE140228_HCC@meta.data),anno_data$Barcode),]
+colnames(anno_data)
+GSE140228_HCC@meta.data[,4:12] <- anno_data[,1:9]
+GSE140228_HCC$Sample <- paste(GSE140228_HCC$Donor,GSE140228_HCC$Tissue_sub,sep = '_')
+a1 = GSE140228_HCC@meta.data[,"Donor"]
+a1 = GSE140228_HCC@meta.data[,"Tissue_sub"]
+class(GSE140228_HCC[['Sample']])
+table(GSE140228_HCC[['Sample']])
+unique(GSE140228_HCC$Sample)
+class(GSE140228_HCC@meta.data[["Sample"]])
+Idents(GSE140228_HCC) <- GSE140228_HCC@meta.data[["Sample"]]
+
+
+
+###################################QC part######################################
+#mitochondrial QC metrics
+GSE140228_HCC[["percent.MT"]] <- PercentageFeatureSet(GSE140228_HCC, pattern = "^MT-")
+HB.genes <- c("HBA1","HBA2","HBB","HBD","HBE1","HBG1","HBG2","HBM","HBQ1","HBZ")
+HB_m <- match(HB.genes, rownames(GSE140228_HCC@assays$RNA))
+HB.genes <- rownames(GSE140228_HCC@assays$RNA)[HB_m]
+HB.genes <- HB.genes[!is.na(HB.genes)] 
+HB.genes
+GSE140228_HCC[["percent.HB"]]<-PercentageFeatureSet(GSE140228_HCC, features=HB.genes) 
+# Visualize QC metrics as a violin plot
+VlnPlot(GSE140228_HCC, features = c("nFeature_RNA", "nCount_RNA", "percent.MT","percent.HB"), ncol = 4,pt.size = 0.00)
+ggsave("vlnplot_before_qc.pdf",dpi = 300, width = 12, height = 6) 
+
+##filter
+allcell <- subset(GSE140228_HCC, subset = 
+                    nFeature_RNA > 400 &
+                    nCount_RNA >1000 &
+                    nCount_RNA <20000 & 
+                    percent.MT < 10 #& percent.Hb<0.1
+)
+
+
+
+
+Idents(allcell)<-allcell$Tissue
+table(allcell$Tissue)
+allcell = subset(allcell,idents = c('Normal','Tumor'))
+Idents(allcell)<-allcell$Tissue
+table(allcell$Tissue)
+
+###################################Integrate data  part#########################
+library(harmony)
+DefaultAssay(allcell2) <- "RNA"  
+allcell_harmony <- NormalizeData(allcell2) %>% FindVariableFeatures() %>% ScaleData() %>% RunPCA(verbose=FALSE)
+system.time({allcell_harmony <- RunHarmony(allcell_harmony, group.by.vars = "Sample")})
+allcell_harmony <- RunUMAP(allcell_harmony, reduction = "harmony", dims = 1:30)
+DimPlot(object = allcell_harmony , reduction = "umap", label = T,label.size = 6,repel = T,pt.size = 0.01)  + NoLegend()+NoAxes()#
+allcell_harmony <- RunTSNE(allcell_harmony, reduction = "harmony", dims = 1:30)
+DimPlot(object = allcell_harmony , reduction = "tsne", label = T,label.size = 6,repel = T,pt.size = 0.01
+)  + NoLegend()+NoAxes()#分组umap
+allcell_harmony <- FindNeighbors(allcell_harmony, reduction = "harmony", dims = 1:30)
+allcell_harmony <- FindClusters(allcell_harmony,resolution = 1)
+able(allcell_harmony$seurat_clusters)
+Idents(allcell_harmony) <- allcell_harmony@meta.data$seurat_cluster
+new.cluster.ids <- c(1:length(levels(allcell_harmony)))
+names(x = new.cluster.ids) <- levels(x = allcell_harmony)
+allcell_harmony <- RenameIdents(object = allcell_harmony, new.cluster.ids)
+allcell_harmony[["Clusters"]]<-Idents(allcell_harmony)
+
+Idents(allcell_harmony)<-allcell_harmony$Clusters
+allcell_harmony.markers_res0.5 <- FindAllMarkers(allcell_harmony, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+allcell_harmony.markers_res0.5 <- allcell_harmony.markers_res0.5
+allcell_harmony.markers_res0.5$nLog_padj <- -log10(allcell_harmony.markers_res0.5$p_val_adj) 
+allcell_harmony.markers_res0.5$ratio <- allcell_harmony.markers_res0.5$pct.1/allcell_harmony.markers_res0.5$pct.2
+out <- cbind(gene=allcell_harmony.markers_res0.5$gene,allcell_harmony.markers_res0.5)
+write.table(out,'allcell_harmony_marker_res0.5.xls',sep = '\t',quote = F,row.names = F)
+top10markers <- allcell_harmony.markers_res0.5 %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC)
+write.csv(top10markers,"allcell_harmony_top10.csv")
+
+Idents(allcell_harmony)<-allcell_harmony$Clusters
+table(allcell_harmony$Clusters)
+
+p=FeaturePlot(allcell_harmony,features=c('SLC7A11'), reduction = "tsne",
+              pt.size = 1,raster=FALSE,order=T)
+
+######celltype name
+allcell@meta.data$celltype <- as.character(allcell@meta.data$Clusters)
+allcell@meta.data$celltype[allcell@meta.data$Clusters %in% as.character(c(1))] <- 'CD4T' #
+allcell@meta.data$celltype[allcell@meta.data$Clusters %in% as.character(c(2))] <- 'CD8T' #
+allcell@meta.data$celltype[allcell@meta.data$Clusters %in% as.character(c(3))] <- 'NK/NKT'#
+allcell@meta.data$celltype[allcell@meta.data$Clusters %in% as.character(c(4))] <- 'CD8T'#
+allcell@meta.data$celltype[allcell@meta.data$Clusters %in% as.character(c(5))] <- 'NK/NKT'#
+allcell@meta.data$celltype[allcell@meta.data$Clusters %in% as.character(c(6))] <- 'CD8T'#
+allcell@meta.data$celltype[allcell@meta.data$Clusters %in% as.character(c(7))] <- 'Monocyte'#
+allcell@meta.data$celltype[allcell@meta.data$Clusters %in% as.character(c(8))] <- 'TAM'#
+allcell@meta.data$celltype[allcell@meta.data$Clusters %in% as.character(c(9))] <- 'CD4T'#
+allcell@meta.data$celltype[allcell@meta.data$Clusters %in% as.character(c(10))] <- 'DC'#
+allcell@meta.data$celltype[allcell@meta.data$Clusters %in% as.character(c(11))] <- 'CD8T'#
+allcell@meta.data$celltype[allcell@meta.data$Clusters %in% as.character(c(12))] <- 'B'#
+allcell@meta.data$celltype[allcell@meta.data$Clusters %in% as.character(c(13))] <- 'CD4T'#
+allcell@meta.data$celltype[allcell@meta.data$Clusters %in% as.character(c(14))] <- 'NK/NKT'#
+allcell@meta.data$celltype[allcell@meta.data$Clusters %in% as.character(c(15))] <- 'Monocyte'#
+allcell@meta.data$celltype[allcell@meta.data$Clusters %in% as.character(c(16))] <- 'B'#
+allcell@meta.data$celltype[allcell@meta.data$Clusters %in% as.character(c(17))] <- 'DC'#
+allcell@meta.data$celltype[allcell@meta.data$Clusters %in% as.character(c(18))] <- 'Unknown'
+allcell@meta.data$celltype[allcell@meta.data$Clusters %in% as.character(c(19))] <- 'DC'#
+allcell@meta.data$celltype[allcell@meta.data$Clusters %in% as.character(c(20))] <- 'Mast Cell'
+allcell@meta.data$celltype[allcell@meta.data$Clusters %in% as.character(c(21))] <- 'DC'#
+allcell@meta.data$celltype[allcell@meta.data$Clusters %in% as.character(c(22))] <- 'CD8T'#
+allcell@meta.data$celltype[allcell@meta.data$Clusters %in% as.character(c(23))] <- 'Unknown'
+
+allcell_harmony@meta.data$Clusters <- allcell@meta.data$celltype
+allcell_harmony@meta.data$celltype <- allcell@meta.data$celltype
+
+Idents(allcell_harmony) = allcell_harmony@meta.data$celltype 
+unique(allcell_harmony$celltype)
+table(allcell_harmony$Clusters)
+
+
+
+###fliter unknown
+Idents(allcell_harmony) <- allcell_harmony@meta.data$celltype
+unique(allcell_harmony$celltype)
+table(Idents(allcell_harmony))
+
+allcell_harmony <- subset(allcell_harmony, idents =  c( "CD8T",
+                                                        "CD4T",
+                                                        "NK/NKT" ,
+                                                        "TAM" ,
+                                                        "B" ,
+                                                        "DC",
+                                                        'Mast Cell',
+                                                        'Monocyte'
+))
+
+Idents(allcell) <- allcell@meta.data$celltype
+unique(allcell$celltype)
+table(Idents(allcell))
+
+allcell <- subset(allcell, idents =  c("CD8T",
+                                       "CD4T",
+                                       "NK/NKT" ,
+                                       "TAM" ,
+                                       "B" ,
+                                       "DC",
+                                       'Mast Cell',
+                                       'Monocyte'
+))
+
+
+DimPlot(
+  object = allcell_harmony,
+  reduction = "tsne",
+  label = TRUE,
+  label.size = 6,
+  repel = TRUE,
+  pt.size = 1,
+  cols = my36colors
+) + 
+  theme(
+    panel.border = element_rect(colour = "black", fill = NA, size = 1),
+    panel.background = element_blank(),
+    axis.line = element_line(colour = "black"),
+    axis.ticks = element_line(colour = "black"),
+    axis.text = element_text(colour = "black"),
+    plot.title = element_text(hjust = 0.5, size = 16)  # 设置标题居中
+    
+  ) +
+  NoLegend()+
+  ggtitle('Celltype in scRNA')
+ggsave("tsne_harmony.pdf",width =5.5,height = 5)
+
+
+###################################SLC7A11+/- cells ratio  part##################
+allcell_harmony$Ccl2='Negative'
+k_posi<-subset(allcell_harmony,rna_SLC7A11>0)
+allcell_harmony$Ccl2[match(rownames(k_posi@meta.data),rownames(allcell_harmony@meta.data))]='Positive'
+VlnPlot(allcell_harmony,features ="rna_SLC7A11",group.by = 'Ccl2',pt.size = 0.001)#Positive
+table(allcell_harmony$Ccl2)
+ggsave("pos_SLC7A11.pdf",width = 6,height = 4)
+
+VlnPlot(object = allcell_harmony, features = c('SLC7A11'), pt.size = 1, slot = "data")
+ggsave("pos_SLC7A11.pdf",width = 6,height = 4)
+
+
+colnames(allcell_harmony@meta.data)#Tissue_sub,slc7a11
+tdata <- allcell_harmony@meta.data[,c('Ccl2','celltype')]#
+tdata1 <- table(tdata)
+tdata2 <- as.data.frame.matrix(t(apply(tdata1,1,function(x){unlist(lapply(x,function(z){z/sum(x)}))})))
+tdata2$group <- rownames(tdata2)
+rownames(tdata2)
+tdata3 <- gather(tdata2,cluster,percentage,-group)
+tdata3$percentage <- tdata3$percentage*100
+
+p <- ggplot(tdata3, aes(fill=cluster, y=percentage, x=group)) + 
+  geom_bar(stat="identity", width=0.7) +
+  theme_bw()+ 
+  theme(axis.text = element_text(size=14),
+        axis.text.x = element_text(),  # 
+        legend.text = element_text(size=14),
+        legend.title = element_blank(),
+        plot.title = element_text(hjust = 0.5, size = 16) # 
+  )+xlab("")+ylab("")+
+  scale_fill_brewer(palette = "Set3")+
+  ggtitle('SLC7A11+ Cell Percentage')
+p
+ggsave("SLC7A11-celltype_ration.pdf",width = 4,height = 4)
+
+
+
+
+###################################DC  part####################################
+
+library(Seurat)
+library(dplyr)
+library(reshape2)
+library(RColorBrewer)
+library(ggrepel)
+library(ggplot2)
+library(tidyr)
+library(viridis)
+library(SeuratWrappers)
+#library(devtools)
+library(harmony)
+
+Idents(allcell) <- allcell@meta.data$celltype
+unique(allcell$celltype)
+seuratDC<-subset(allcell,idents='DC')
+seuratDC[["RNA"]] <- JoinLayers(seuratDC[["RNA"]])
+DefaultAssay(seuratDC) <- "RNA"  
+seuratDC<- NormalizeData(seuratDC, verbose = FALSE)
+seuratDC<- FindVariableFeatures(seuratDC, selection.method = "vst", nfeatures = 2000, 
+                                verbose = FALSE)
+seuratDC<- ScaleData(seuratDC)
+seuratDC<- RunPCA(seuratDC)
+ElbowPlot(seuratDC)
+pc.num=1:20
+
+######harmony########
+system.time({seuratDC <- RunHarmony(seuratDC, group.by.vars = "Sample")})
+seuratDC <- RunTSNE(seuratDC, reduction = "harmony", dims = 1:30)
+seuratDC <- FindNeighbors(seuratDC, reduction = "harmony", dims = 1:30) %>% FindClusters(resolution = 0.3)
+
+Idents(seuratDC) <- seuratDC@meta.data$seurat_cluster
+new.cluster.ids <- c(1:length(levels(seuratDC)))
+names(x = new.cluster.ids) <- levels(x = seuratDC)
+seuratDC <- RenameIdents(object = seuratDC, new.cluster.ids)
+seuratDC[["Clusters"]]<-Idents(seuratDC)
+Idents(seuratDC) <- seuratDC$Clusters 
+
+
+Idents(seuratDC) <- seuratDC$seurat_clusters
+seuratDC.markers_res0.3 <- FindAllMarkers(seuratDC, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+seuratDC.markers_res0.3$nLog_padj <- -log10(seuratDC.markers_res0.3$p_val_adj) 
+seuratDC.markers_res0.3$ratio <- seuratDC.markers_res0.5$pct.1/seuratDC.markers_res0.3$pct.2
+out <- cbind(gene=seuratDC.markers_res0.3$gene,seuratDC.markers_res0.3)
+write.table(out,'seuratDCcluster.xls',sep = '\t',quote = F,row.names = F)
+
+###
+seuratDC@meta.data$celltype <- as.character(seuratDC@meta.data$Clusters)
+seuratDC@meta.data$celltype[seuratDC@meta.data$Clusters %in% as.character(c(1))] <- 'cDC2'#
+seuratDC@meta.data$celltype[seuratDC@meta.data$Clusters %in% as.character(c(2))] <- 'cDC2' #
+seuratDC@meta.data$celltype[seuratDC@meta.data$Clusters %in% as.character(c(3))] <- 'cDC1'#
+seuratDC@meta.data$celltype[seuratDC@meta.data$Clusters %in% as.character(c(4))] <- 'cDC2'#
+seuratDC@meta.data$celltype[seuratDC@meta.data$Clusters %in% as.character(c(5))] <- 'mregDC'#
+seuratDC@meta.data$celltype[seuratDC@meta.data$Clusters %in% as.character(c(6))] <- 'cDC2'#
+seuratDC@meta.data$celltype[seuratDC@meta.data$Clusters %in% as.character(c(7))] <- 'pDC'#
+seuratDC@meta.data$celltype[seuratDC@meta.data$Clusters %in% as.character(c(8))] <- 'LCs'#
+seuratDC@meta.data$celltype[seuratDC@meta.data$Clusters %in% as.character(c(9))] <- 'pDC'#
+seuratDC@meta.data$celltype[seuratDC@meta.data$Clusters %in% as.character(c(10))] <- 'cDC1'#
+
+Idents(seuratDC) <- seuratDC@meta.data$celltype
+unique(seuratDC$celltype)
+table(seuratDC$celltype)
+table(seuratDC$seurat_clusters)
+
+seuratDC <- subset(seuratDC, idents =  c( "cDC1" ,
+                                          "cDC2" ,
+                                          "mregDC",
+                                          'pDC',
+                                          'LCs'
+))
+
+DimPlot(
+  object = seuratDC,
+  reduction = "tsne",
+  label = TRUE,
+  label.size = 6,
+  repel = TRUE,
+  pt.size = 2,
+  cols = my36colors
+) + 
+  theme(
+    panel.border = element_rect(colour = "black", fill = NA, size = 1),
+    panel.background = element_blank(),
+    axis.line = element_line(colour = "black"),
+    axis.ticks = element_line(colour = "black"),
+    axis.text = element_text(colour = "black"),
+    plot.title = element_text(hjust = 0.5, size = 16) 
+  ) +
+  ggtitle('Celltype in cDC')+
+  NoLegend()
+ggsave("tsne_seuratDC.pdf",width =5.5,height = 5)
+
+
+library(RColorBrewer)
+FeaturePlot(
+  seuratDC,
+  features = c('SLC7A11'),
+  reduction = "tsne",
+  pt.size = 1,
+  raster = FALSE,
+  order = T
+) + 
+  theme(
+    panel.border = element_rect(colour = "black", fill = NA, size = 1),
+    panel.background = element_blank(),
+    axis.line = element_line(colour = "black"),
+    axis.ticks = element_line(colour = "black"),
+    axis.text = element_text(colour = "black"))+   
+  ggtitle("SLC7A11 Expression in DC")
+
+
+####SLC7A11+/- DCs ratio####
+seuratDC$Ccl2='Negative'
+k_posi<-subset(seuratDC,rna_SLC7A11>0)
+seuratDC$Ccl2[match(rownames(k_posi@meta.data),rownames(seuratDC@meta.data))]='Positive'
+VlnPlot(seuratDC,features ="rna_SLC7A11",group.by = 'Ccl2',pt.size = 0.001)#Positive
+table(seuratDC$Ccl2)
+ggsave("DC_pos_SLC7A11.pdf",width = 6,height = 4)
+VlnPlot(seuratDC,features =c('SLC7A11'),pt.size = 1)#Positive
+ggsave("VinplotPlotDC_SLC7A11.pdf",width = 6,height = 4)
+
+
+colnames(seuratDC@meta.data)#Tissue_sub,slc7a11
+tdata <- seuratDC@meta.data[,c('Ccl2','celltype')]#提取所需数据
+
+tdata1 <- table(tdata)
+tdata2 <- as.data.frame.matrix(t(apply(tdata1,1,function(x){unlist(lapply(x,function(z){z/sum(x)}))})))
+tdata2$group <- rownames(tdata2)
+rownames(tdata2)
+tdata3 <- gather(tdata2,cluster,percentage,-group)
+tdata3$percentage <- tdata3$percentage*100
+
+p <- ggplot(tdata3, aes(fill=cluster, y=percentage, x=group)) + 
+  geom_bar(stat="identity", width=0.7) +
+  theme_bw()+ 
+  theme(axis.text = element_text(size=14),
+        axis.text.x = element_text(),  # 设置 x 轴文本为空
+        legend.text = element_text(size=14),
+        legend.title = element_blank(),
+        plot.title = element_text(hjust = 0.5, size = 16) # 
+  )+xlab("")+ylab("")+
+  scale_fill_brewer(palette = "Set3")+
+  ggtitle('SLC7A11+ Cell Percentage in cDC')
+p
+ggsave("SLC7A11-celltype_rationDC3.pdf",width = 4,height = 4)
+dev.off()

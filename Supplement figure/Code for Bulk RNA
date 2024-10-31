@@ -1,0 +1,125 @@
+###################################Bulk-RNA part##############################
+library(ggplot2)
+library(limma)
+library(pheatmap)
+library(ggsci)
+library(dplyr)
+lapply(c('clusterProfiler','enrichplot','patchwork'), function(x) {library(x, character.only = T)})
+library(org.Hs.eg.db)
+library(patchwork)
+library(GSEABase)
+library(GSVA)
+
+source('CIBERSORT.R')
+result1 <- CIBERSORT('LM22V2.txt','xxxx.txt', perm = 1000, QN = T) 
+library(limma)
+library(reshape2)
+library(tidyverse)
+library(ggplot2)
+my36colors <-c('#E95C59','#E5D2DD', '#5F3D69', '#F1BB72', '#F3B1A0', '#57C3F3', '#476D87', '#E59CC4', '#AB3282', '#23452F', '#BD956A', '#8C549C', '#585658',
+               '#9FA3A8', '#E0D4CA', '#B53E2B','#53A85F', '#C5DEBA', '#58A4C3', '#E4C755', '#F7F398',
+               '#AA9A59', '#E63863', '#E39A35', '#C1E6F3', '#6778AE', '#91D0BE', 
+               '#712820', '#DCC1DD', '#CCE0F5',  '#CCC9E6', '#625D9E', '#68A180', '#3A6963',
+               '#968175'
+)
+rt=read.table(("CIBERSORT-Results.txt"),sep="\t",header=T,row.names = 1)
+
+
+cibersort=as.data.frame(rt)
+immune=cibersort
+data=as.matrix(immune[,0:(ncol(immune)-3)])
+colnames(immune)=gsub("CIBERSORT-Results"," ",colnames(immune))
+colnames(data)=gsub("CIBERSORT-Results"," ",colnames(data))
+colnames(immune)=gsub("_"," ",colnames(immune))
+colnames(data)=gsub("_"," ",colnames(data))
+cluster=read.table("sample.txt", header=F, sep="\t", check.names=F, row.names=1)
+colnames(cluster)="Type"
+sameSample=intersect(row.names(data), row.names(cluster))
+data=cbind(data[sameSample,,drop=F], cluster[sameSample,,drop=F])
+data=data[order(data$Type),]
+gaps=c(1, as.vector(cumsum(table(data$Type))))
+xlabels=levels(factor(data$Type))
+data$Type=factor(data$Type, levels=c(cluster[1,1],cluster[nrow(cluster),1]))
+data$GSM=rownames(data)
+data=melt(data,id.vars=c("Type","GSM"))
+colnames(data)=c("Type","GSM","Celltype", "Freq")
+Cellratio=data
+colourCount = length(unique(Cellratio$Celltype))
+ggplot(Cellratio) + 
+  geom_bar(aes(x =GSM, y= Freq, fill = Celltype),stat = "identity",width = 0.7,size = 0.5,colour = '#222222')+ 
+  theme_classic() +
+  labs(x='Cell cycle phase',y = 'Ratio')+
+  theme(panel.border = element_rect(fill=NA,color="black", size=3, linetype="solid"),
+        legend.position = "right" )+   
+  scale_fill_manual(values=my36colors)+
+  theme_bw()+
+  xlab(NULL)+
+  theme(axis.text.x  = element_blank())+
+  guides(
+    fill = guide_legend(
+      ncol = 2, 
+      byrow = TRUE, 
+      label.theme = element_text(size = 15),  # 
+    ))+
+  facet_grid(. ~ Type,scales="free")+
+  theme(strip.text.x = element_text(size = 30,colour = "black"))+       
+  theme(strip.background.x = element_rect(fill = c("#C1E6F3"), colour = "black"))+
+  theme(
+    legend.key.size = unit(33, "pt"),   # 
+    legend.title = element_text(size = 20),  #
+    legend.box.background = element_rect(color = "black", size = 3)  # 
+    
+  )
+ggsave("immune.ration.pdf",width = 15,height = 8)        
+
+
+
+
+###KM analysis
+library(GEOquery)
+library(limma)
+library(affy)
+library(survival)
+library(survminer)
+
+a1 <- read.table("xxxx.txt", header=TRUE, sep="\t", row.names=1, check.names=FALSE)
+a2 <- a1[,c('futime',"fustat","SLC7A11")]
+names(a2)[names(a2) == "futime"] <- "FUTIME"
+names(a2)[names(a2) == "fustat"] <- "FUSTAT"
+
+
+a2$FUTIME <-a2$FUTIME / 30
+merged_data = a2
+merged_data$SLC7A11 <- as.numeric(as.character(merged_data$SLC7A11))
+merged_data <- merged_data[merged_data$FUTIME >= 1, ]
+
+cutoff<-surv_cutpoint(merged_data, 
+                      time="FUTIME",
+                      event="FUSTAT",
+                      variables="SLC7A11");summary(cutoff) #
+
+###中位值
+median_SLC7A11 <- median(merged_data$SLC7A11, na.rm = TRUE)
+merged_data$group <- ifelse(merged_data$SLC7A11 >= median_SLC7A11, "High", "Low")
+str(merged_data)
+head(merged_data)
+fit <- survfit(Surv(FUTIME, FUSTAT) ~ group, data = merged_data)
+
+ggsurvplot(fit, 
+           data = merged_data,     
+           pval=TRUE,         
+           pval.method=TRUE,  
+           palette = c( "red", "#00A087FF"),
+           risk.table = T, #显示风险表
+           conf.int = F, 
+           title = "ICGC Cohort",
+           font.main = c(16, "bold", "darkblue"),
+           font.x = c(16, "plain", "black"),
+           font.y = c(16, "plain", "black"),
+           font.tickslab = c(16, "plain", "black"),
+           font.legend = c(16, "plain", "black"))   
+
+####COX
+cox_model <- coxph(Surv(FUTIME, FUSTAT) ~ SLC7A11, data = merged_data)
+ggforest(cox_model, data = merged_data)
+
